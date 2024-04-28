@@ -17,8 +17,26 @@ class cpu_monitor_c extends uvm_monitor;
     covergroup cover_cpu_packet;
         option.per_instance = 1;
         option.name = "cover_cpu_packets";
-        REQUEST: coverpoint packet.request_type;
-        //TODO: add coverpoints for Data, Address, etc.
+        REQ_TYPE: coverpoint packet.request_type;
+        
+       
+        DATA: coverpoint packet.dat{
+                option.auto_bin_max = 10;
+        }
+        
+        ADDRESS: coverpoint packet.address{
+                option.auto_bin_max = 10;
+        }
+
+        ADDRESS_TYPE: coverpoint packet.addr_type;
+        NUMCYCLES: coverpoint packet.num_cycles;
+        ILLEGAL: coverpoint packet.illegal;
+		
+	//	X_REQTYPE__DATA: cross REQ_TYPE, DATA;
+        X_REQTYPE__ADDR: cross REQ_TYPE, ADDRESS;
+        X_REQTYPE__ADDRTYPE: cross REQ_TYPE, ADDRESS_TYPE{
+		ignore_bins no_icache_write = binsof(REQ_TYPE) intersect {WRITE_REQ} && binsof(ADDRESS_TYPE) intersect {ICACHE};}
+		
     endgroup
 
     //constructor
@@ -54,14 +72,24 @@ class cpu_monitor_c extends uvm_monitor;
                 end
 
             packet.address = vi_cpu_lv1_if.addr_bus_cpu_lv1;
-            @(posedge vi_cpu_lv1_if.data_in_bus_cpu_lv1 or posedge vi_cpu_lv1_if.cpu_wr_done)
-            packet.dat = vi_cpu_lv1_if.data_bus_cpu_lv1;
-            @(negedge vi_cpu_lv1_if.cpu_rd or negedge vi_cpu_lv1_if.cpu_wr)
+          
+          
             if(packet.address < 32'h4000_0000)
                 packet.addr_type = ICACHE_ACC;
             else
                 packet.addr_type = DCACHE_ACC;
 
+
+             if( packet.addr_type == ICACHE && packet.request_type == WRITE_REQ) begin
+              packet.illegal = 1'b1;
+            end
+
+
+              @(posedge vi_cpu_lv1_if.data_in_bus_cpu_lv1 or posedge vi_cpu_lv1_if.cpu_wr_done)
+            packet.dat = vi_cpu_lv1_if.data_bus_cpu_lv1;
+          
+            @(negedge vi_cpu_lv1_if.cpu_rd or negedge vi_cpu_lv1_if.cpu_wr)
+          
             mon_out.write(packet);
             cover_cpu_packet.sample();
         end

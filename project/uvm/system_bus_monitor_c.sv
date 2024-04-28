@@ -28,12 +28,51 @@ class system_bus_monitor_c extends uvm_monitor;
         }
         //TODO: Add coverage for other fields of sbus_mon_packet
 
-        //cross coverage
-        //ensure each processor has read miss, write miss, invalidate, etc.
-        X_PROC__REQ_TYPE: cross REQUEST_TYPE, REQUEST_PROCESSOR;
-        X_PROC__ADDRESS: cross REQUEST_PROCESSOR, REQUEST_ADDRESS;
-        X_PROC__DATA: cross REQUEST_PROCESSOR, READ_DATA;
+
+	    WR_DATA_SNOOP: coverpoint s_packet.wr_data_snoop{
+            option.auto_bin_max = 10;
+        }
+		
+		BUS_REQUEST_SNOOP: coverpoint  s_packet.bus_req_snoop {
+            ignore_bins no_snoop = {4'b1111};
+        }
+		SNOOP_WR_REQUEST_FLAG: coverpoint s_packet.snoop_wr_req_flag;
+		
+		REQUEST_SERVICED_BY: coverpoint  s_packet.req_serviced_by{
+           ignore_bins ignore_req_serviced_by = {SERV_NONE};
+	}
+
+		CP_IN_CACHE: coverpoint s_packet.cp_in_cache;
+		SHARED: coverpoint s_packet.shared;
+		
+		
+		PROC_EVICT_DIRTY_BLK_ADDR: coverpoint s_packet.proc_evict_dirty_blk_addr{
+           option.auto_bin_max = 10;
+        }
+     //   PROC_EVICT_DIRTY_BLK_DATA: coverpoint s_packet.proc_evict_dirty_blk_data{
+     //      option.auto_bin_max = 10;
+     //   }
+        PROC_EVICT_DIRTY_BLK_FLAG: coverpoint s_packet.proc_evict_dirty_blk_flag;
+
+
+
         //TODO: Add relevant cross coverage (examples shown above)
+
+        X_PROC_REQ_TYPE: cross REQUEST_TYPE, REQUEST_PROCESSOR;
+        X_PROC_ADDRESS: cross REQUEST_PROCESSOR, REQUEST_ADDRESS;
+      
+		X_PROC_WR_DATA: cross REQUEST_PROCESSOR, WR_DATA_SNOOP;
+        
+		//requested number and snoop
+		X_PROC_SNOOP: cross REQUEST_PROCESSOR, BUS_REQUEST_SNOOP{
+bins snoop_proc = binsof(REQUEST_PROCESSOR) intersect {REQ_PROC0, REQ_PROC1, REQ_PROC2, REQ_PROC3} && binsof(BUS_REQUEST_SNOOP) intersect{4'b0001, 4'b0010, 4'b0100, 4'b1000};
+        }
+		
+		//request and serviced by cross
+		X_PROC_SERVICED_BY: cross REQUEST_PROCESSOR, REQUEST_SERVICED_BY;
+
+
+
     endgroup
 
     // Virtual interface of used to observe system bus interface signals
@@ -75,7 +114,17 @@ class system_bus_monitor_c extends uvm_monitor;
 
             // wait for assertion of either bus_rd, bus_rdx or invalidate before monitoring other bus activities
             // lv2_rd for I-cache cases
-            @(posedge(vi_sbus_if.bus_rd | vi_sbus_if.bus_rdx | vi_sbus_if.invalidate | vi_sbus_if.lv2_rd));
+            @(posedge(vi_sbus_if.bus_rd | vi_sbus_if.bus_rdx | vi_sbus_if.invalidate | vi_sbus_if.lv2_rd | vi_sbus_if.lv2_wr));
+            
+            
+               if(vi_sbus_if.lv2_wr)
+                begin
+                    s_packet.proc_evict_dirty_blk_addr = vi_sbus_if.addr_bus_lv1_lv2;
+                    s_packet.proc_evict_dirty_blk_data = vi_sbus_if.data_bus_lv1_lv2;
+                    s_packet.proc_evict_dirty_blk_flag = 1;
+                end
+         
+            
             fork
                 begin: cp_in_cache_check
                     // check for cp_in_cache assertion
@@ -86,18 +135,14 @@ class system_bus_monitor_c extends uvm_monitor;
                     wait(vi_sbus_if.shared & vi_sbus_if.data_in_bus_lv1_lv2) s_packet.shared = 1;
                 end : shared_check
 
+                begin: snoop_wr_req_check
+                    @(posedge vi_sbus_if.lv2_wr) s_packet.snoop_wr_req_flag = 1;
+                end : snoop_wr_req_check
+
             join_none
 
             // bus request type
-            if (vi_sbus_if.bus_rd === 1'b1 && vi_sbus_if.addr_bus_lv1_lv2 >= 32'h4000_0000)
-                s_packet.bus_req_type = BUS_RD;
-            else if(vi_sbus_if.bus_rdx == 1'b1)
-                s_packet.bus_req_type = BUS_RDX;
-            else if(vi_sbus_if.invalidate == 1'b1)
-                s_packet.bus_req_type = INVALIDATE;
-            else if(vi_sbus_if.bus_rd && vi_sbus_if.addr_bus_lv1_lv2 < 32'h4000_0000)
-                s_packet.bus_req_type = ICACHE_RD;
-
+            
             // proc which requested the bus access
             case (1'b1)
                 vi_sbus_if.bus_lv1_lv2_gnt_proc[0]: s_packet.bus_req_proc_num = REQ_PROC0;
@@ -114,10 +159,24 @@ class system_bus_monitor_c extends uvm_monitor;
 
             // fork and call tasks
             fork: update_info
+               
 
-                // to determine which of snoops or L2 serviced read miss
+               begin
+					@(|vi_sbus_if.bus_lv1_lv2_req_snoop) 
+					s_packet.bus_req_snoop = vi_sbus_if.bus_lv1_lv2_req_snoop;
+				end
+				
+                begin
+					@(vi_sbus_if.cp_in_cache)
+					wait(vi_sbus_if.lv2_wr_done)
+					s_packet.snoop_wr_req_flag = 1'b1;
+					s_packet.wr_data_snoop = vi_sbus_if.data_bus_lv1_lv2;
+				end
+                
+               
+               
                 begin: req_service_check
-                   if (s_packet.bus_req_type == BUS_RD )
+                   if (s_packet.bus_req_type == BUS_RD || s_packet.bus_req_type == BUS_RDX)
                     begin
                         @(posedge vi_sbus_if.data_in_bus_lv1_lv2);
                         `uvm_info(get_type_name(), "Bus read or bus readX successful", UVM_LOW)
@@ -129,13 +188,41 @@ class system_bus_monitor_c extends uvm_monitor;
                             vi_sbus_if.bus_lv1_lv2_gnt_snoop[2]:begin  s_packet.req_serviced_by = SERV_SNOOP2;`uvm_info(get_type_name(), "served by snoop2", UVM_LOW) end
                             vi_sbus_if.bus_lv1_lv2_gnt_snoop[3]: begin s_packet.req_serviced_by = SERV_SNOOP3;`uvm_info(get_type_name(), "served by snoop3", UVM_LOW) end
                             vi_sbus_if.bus_lv1_lv2_gnt_lv2     : s_packet.req_serviced_by = SERV_L2;
-                          //  default : s_packet.req_serviced_by = SERV_NONE;
+                         
                         endcase
                     end
                 end: req_service_check
 
 
-                begin :READ_MODIFY
+
+
+				begin
+					if (s_packet.bus_req_type == ICACHE_RD)
+					begin
+						@(posedge vi_sbus_if.data_in_bus_lv1_lv2);
+						s_packet.rd_data = vi_sbus_if.data_bus_lv1_lv2;
+						case (1'b1)
+						vi_sbus_if.bus_lv1_lv2_gnt_snoop[0]: begin s_packet.req_serviced_by = SERV_SNOOP0;`uvm_info(get_type_name(), "ICACHE served by snoop0", UVM_LOW) end
+						vi_sbus_if.bus_lv1_lv2_gnt_snoop[1]: begin s_packet.req_serviced_by = SERV_SNOOP1;`uvm_info(get_type_name(), "ICACHE served by snoop1", UVM_LOW) end
+						vi_sbus_if.bus_lv1_lv2_gnt_snoop[2]: begin s_packet.req_serviced_by = SERV_SNOOP2;`uvm_info(get_type_name(), "ICACHE served by snoop2", UVM_LOW) end
+						vi_sbus_if.bus_lv1_lv2_gnt_snoop[3]: begin s_packet.req_serviced_by = SERV_SNOOP3;`uvm_info(get_type_name(), "ICACHE served by snoop3", UVM_LOW) end
+						vi_sbus_if.bus_lv1_lv2_gnt_lv2     : s_packet.req_serviced_by = SERV_L2;
+						endcase
+					end
+				end
+				
+				begin
+					if (s_packet.bus_req_type == INVALIDATE)
+					begin
+						@(posedge vi_sbus_if.all_invalidation_done);
+						`uvm_info(get_type_name(), "Invalidate is done", UVM_LOW)
+					end
+				end
+
+
+
+/*
+                begin 
 				   if(s_packet.bus_req_type == BUS_RDX)
 				   begin
 					@(posedge vi_sbus_if.clk);
@@ -151,21 +238,33 @@ class system_bus_monitor_c extends uvm_monitor;
 					vi_sbus_if.bus_lv1_lv2_gnt_lv2     : s_packet.req_serviced_by = SERV_L2;
 				     endcase
 				   end
-				end: READ_MODIFY
-
+				end
+*/
             join_none : update_info
 
-            if(vi_sbus_if.lv2_wr)
-                begin
-                    s_packet.proc_evict_dirty_blk_addr = vi_sbus_if.addr_bus_lv1_lv2;
-                    s_packet.proc_evict_dirty_blk_data = vi_sbus_if.data_bus_lv1_lv2;
-                    s_packet.proc_evict_dirty_blk_flag = 1;
-                end
                     
             // wait until request is processed and send data
             @(negedge vi_sbus_if.bus_lv1_lv2_req_proc[0] or negedge vi_sbus_if.bus_lv1_lv2_req_proc[1] or negedge vi_sbus_if.bus_lv1_lv2_req_proc[2] or negedge vi_sbus_if.bus_lv1_lv2_req_proc[3]);
 
+             begin
+			 s_packet.req_address = vi_sbus_if.addr_bus_lv1_lv2;
+			if (vi_sbus_if.bus_rd === 1'b1 && vi_sbus_if.addr_bus_lv1_lv2 >= 32'h4000_0000)//Data stored in instruction level cache is not shared so no coherence protocol is needed.
+                s_packet.bus_req_type = BUS_RD;
+				
+			if (vi_sbus_if.invalidate === 1'b1)
+                s_packet.bus_req_type = INVALIDATE;
+				
+			// bus request type with intention to modify 
+			if (vi_sbus_if.bus_rdx === 1'b1)
+                s_packet.bus_req_type = BUS_RDX;
+				
+			if (vi_sbus_if.bus_rd !== 1'b1 && vi_sbus_if.lv2_rd === 1'b1 && vi_sbus_if.addr_bus_lv1_lv2 < 32'h4000_0000)
+				s_packet.bus_req_type = ICACHE_RD;
+
             `uvm_info(get_type_name(), "Packet to be written", UVM_LOW)
+			end
+            
+
 
             // disable all spawned child processes from fork
             disable fork;
